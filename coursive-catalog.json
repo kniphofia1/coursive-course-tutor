@@ -1,0 +1,18 @@
+{
+  "name": "Coursive 教学插件",
+  "owner": "kniphofia1",
+  "plugins": [
+    {
+      "id": "course-tutor",
+      "version": "0.1.0",
+      "title": "课程伴学",
+      "summary": "基于本地课件和转写分单元讲解，按实际作答调整复习。",
+      "icon": "school",
+      "categories": [
+        "tutor",
+        "review"
+      ],
+      "source": "git:https://github.com/kniphofia1/coursive-course-tutor.git#v0.1.0"
+    }
+  ]
+}

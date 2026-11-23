@@ -1,0 +1,24 @@
+{
+  "name": "coursive-plugin-course-tutor",
+  "version": "0.1.0",
+  "type": "module",
+  "license": "MIT",
+  "description": "基于本地课程资料的分单元教学、变式练习与迁移复测",
+  "files": ["agent.mjs", "session.mjs", "skills", "README.md"],
+  "coursive": {
+    "id": "course-tutor",
+    "api": "^3.0.0",
+    "title": "课程伴学",
+    "summary": "按目标安排复习，从课程原文讲解，等待作答后调整下一题",
+    "icon": "school",
+    "categories": ["tutor", "review"],
+    "permissions": ["library.read"],
+    "runtime": [{ "kind": "pi", "entry": "agent.mjs", "skills": ["skills"] }],
+    "examples": ["带我复习这门课，我只有二十分钟", "继续上次的课程伴学"],
+    "contributes": {
+      "actions": [
+        { "id": "tutor", "title": "课程伴学", "action": "tutor", "surface": "composer.plus" }
+      ]
+    }
+  }
+}
