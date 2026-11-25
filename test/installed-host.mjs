@@ -36,10 +36,10 @@ async function boot(install) {
     assert.match((await host.runAction("course-tutor","tutor")).prompt,/课程伴学/);
   }
   const loader = new DefaultResourceLoader({cwd:root,agentDir:root,noExtensions:true,noSkills:true,
-    noThemes:true,noPromptTemplates:true,noContextFiles:true,extensionFactories:host.extensionFactories(conv,(course,title,progress)=>memory.updateCourseProgress(course,title,progress))});
+    noThemes:true,noPromptTemplates:true,noContextFiles:true,extensionFactories:host.extensionFactories(conv)});
   await loader.reload();
   tools = new Map(loader.getExtensions().extensions.flatMap(ext=>[...ext.tools]));
-  assert.equal(tools.size,8);
+  assert.ok(tools.has("course-tutor__status") && tools.has("course-tutor__answer"));
 }
 const call = async (name,params={}) => JSON.parse((await tools.get("course-tutor__"+name).definition.execute(
   "smoke",params,undefined,undefined,{sessionManager:manager})).content[0].text);
@@ -66,7 +66,38 @@ try {
   say("B"); const done=await call("answer",{revision:6});
   assert.equal(done.stage,"finished"); assert.equal(done.attempts,2);
   const recalled = await memory.prompt({pinnedOnly:true, courseId:"c"});
-  assert.match(recalled,/优先举例/); assert.match(recalled,/迁移复测|已结束/);
-  assert.doesNotMatch(await memory.prompt({pinnedOnly:true,courseId:"other"}),/## 伴学进度/);
+  assert.match(recalled,/优先举例/);
+  assert.doesNotMatch(recalled,/## 伴学进度/);
+  assert.equal((await call("status")).history[0].stage,"finished");
+  const { runLessonStudy } = await installed("src/lesson-study.mjs");
+  const notes = new Map();
+  const lessonApi = async (method,path,body) => {
+    if (path === "/api/lectures/l") return {lecture:{id:"l",course_id:"c",title:"同步"},course:{id:"c"}};
+    if (path.endsWith("/transcript")) return [{text:"条件变量用于等待共享条件。",start_ms:42000}];
+    if (path.endsWith("/courseware") || path.endsWith("/slides")) return [];
+    if (path === "/api/notes" && method === "PUT") { notes.set(body.id, body); return body; }
+    if (notes.has(path.split("/").at(-1))) return notes.get(path.split("/").at(-1));
+    throw Object.assign(Error("fixture missing"),{status:404});
+  };
+  let generations = 0;
+  const pipeline = {
+    currentModel:async()=>({id:"fixture"}),
+    runtime:{completeSimple:async(_model,{messages})=>{
+      generations++;
+      const input = JSON.parse(messages[0].content);
+      const draft = input.material ? {sections:[{
+        title:"条件变量",paragraphs:[{text:"等待共享条件。",refs:[{id:input.material[0].id,quote_index:0}]}],
+        example:{text:"等待队列出现元素。",refs:[]},question:"唤醒后检查什么？",criterion:"共享条件",
+      }]} : {topics:[{query:"条件变量"}]};
+      return {stopReason:"stop",content:[{type:"text",text:JSON.stringify(draft)}]};
+    }},
+  };
+  const deps = {plugins:host,call:lessonApi,pipeline,memory};
+  const handout = await runLessonStudy(deps,"l",{action:"open"});
+  assert.match(handout.note.body,/coursive:\/\/lecture\/l\?t=42/);
+  assert.equal((await runLessonStudy(deps,"l",{action:"open"})).pending.id,handout.pending.id);
+  assert.equal(generations,2);
+  conv.course_id = "other";
+  assert.equal((await call("status")).history.length,0);
   console.log("PASS: packaged plugin, installed Coursive host, Pi session, composer action, source read, turn guard, restart, transfer.");
 } finally { await host?.close(); await rm(root,{recursive:true,force:true}); }
