@@ -77,6 +77,8 @@ test("模型选择片段编号，讲义使用原文和该段时间", async t => 
 
 test("按知识点补查不同材料并把已读出处附在相应段落", async t => {
   const {run,services} = await setup(t);
+  const repeated = "保存现场".repeat(18) + "。";
+  const transcript = {...src,text:repeated+repeated,segments:[{at:0,seconds:3},{at:repeated.length,seconds:72}]};
   const slide = {id:"diagram",kind:"slide",text:"流程图",label:"课件截图 3",link:"coursive://slide/l/3"};
   const exam = {id:"exam",kind:"courseware",role:"past_exam",text:"描述状态切换",link:"coursive://courseware/l?file=exam"};
   const calls = [];
@@ -84,7 +86,7 @@ test("按知识点补查不同材料并把已读出处附在相应段落", async
     catalog:{timeline:[],files:[]},
     lookup:async query => {
       calls.push(query);
-      return query === "切换" ? [src] : [slide,exam];
+      return query === "切换" ? [transcript] : [slide,exam];
     },
     coverage:() => "截图已查看",
   });
@@ -93,9 +95,9 @@ test("按知识点补查不同材料并把已读出处附在相应段落", async
     if (++rounds === 1) return {topics:[{query:"切换"}]};
     if (rounds === 2) return {lookup:[{query:"流程图"}]};
     assert.deepEqual(input.material.map(m=>m.id),["e1","diagram","exam"]);
-    const ref = id => ({id,quote_index:0});
+    const ref = (id,quote_index=0) => ({id,quote_index});
     return {sections:[{title:"如何切换？",paragraphs:[
-      {text:"看流程图理解课堂例子。",refs:[ref("e1"),ref("diagram")]},
+      {text:"看流程图理解课堂例子。",refs:[ref("e1",1),ref("diagram")]},
       {text:"先保存现场再继续。",refs:[ref("e1")]},
     ],example:{text:"两个编辑器的例子。",refs:[]},question:"何时恢复现场？",criterion:"说明切换顺序",
     exam_refs:[ref("exam")]}]};
@@ -104,6 +106,7 @@ test("按知识点补查不同材料并把已读出处附在相应段落", async
   assert.deepEqual(calls,["切换","流程图"]);
   assert.match(state.note.body,/看流程图理解课堂例子。[\s\S]*?!\[课件截图 3\]\(coursive:\/\/slide\/l\/3\)[\s\S]*?课堂 · 回听[\s\S]*?课件截图 3[\s\S]*?先保存现场再继续。/);
   const [explanation,exercise] = state.note.body.split("**自测**");
+  assert.match(explanation,/回听\]\(coursive:\/\/lecture\/l\?t=72\)/);
   assert.doesNotMatch(explanation,/往年题/);
   assert.match(exercise,/练习参考.*往年题/);
   assert.equal((await run("open")).note.body,state.note.body);

@@ -6,7 +6,7 @@ const clean = (s, max) => {
 };
 
 // The model selects an excerpt. Only the host copies its characters into Markdown.
-function passages(text) {
+function passages(text, withOffsets = false) {
   const result = [];
   let start = 0;
   while (start < text.length) {
@@ -16,8 +16,9 @@ function passages(text) {
       if (tail !== -1) end = start+66+tail;
       if (/[\uD800-\uDBFF]/u.test(text.charAt(end-1))) end--;
     }
-    const quote = text.slice(start,end).trim();
-    if (quote) result.push(quote);
+    const chunk = text.slice(start,end);
+    const quote = chunk.trim();
+    if (quote) result.push(withOffsets ? {quote,offset:start+chunk.indexOf(quote)} : quote);
     start=end;
   }
   return result;
@@ -54,17 +55,16 @@ export function renderLesson(s) {
     const src = s.sources[row.source];
     return [heading, row.explanation,
       // Preserve the original layout for saved sections.
-      (row.emphasis ? "老师强调的原话" : src.kind === "slide" ? "课件截图 · 图像转写" : "课堂出处") + " · [" + (src.kind === "transcript" ? "回听" : "打开课件") + "](" + sourceLink(src,row.quote,true) + ")",
+      (row.emphasis ? "老师强调的原话" : src.kind === "slide" ? "课件截图 · 图像转写" : "课堂出处") + " · [" + (src.kind === "transcript" ? "回听" : "打开课件") + "](" + sourceLink(src,row.quote,{legacy:true}) + ")",
       "> " + row.quote.replace(/\n/g, "\n> "), "**补充例子**　" + row.example,
       "**自测**　" + row.question].join("\n\n");
   });
   return ["# " + s.goal, ...parts, s.coverage].filter(Boolean).join("\n\n");
 }
 
-function sourceLink(src, quote, legacy = false) {
+function sourceLink(src, quote, {legacy = false, offset = src.text.indexOf(quote)} = {}) {
   const link = new URL(src.link);
   if (src.kind === "transcript") {
-    const offset = src.text.indexOf(quote);
     const segment = src.segments?.findLast(item => item.at <= offset);
     if (segment) link.searchParams.set("t", String(segment.seconds));
   } else if (src.kind === "courseware") {
@@ -79,7 +79,7 @@ function citation(ref, sources) {
   const label = ref.emphasis ? "老师强调 · 回听" : src.kind === "transcript" ? "课堂 · 回听" :
     src.kind === "slide" ? src.label : src.role === "past_exam" ? "往年题" :
     src.role === "supplement" ? "参考资料" : "课件";
-  return "[" + label + "](" + sourceLink(src,ref.quote) + ")";
+  return "[" + label + "](" + sourceLink(src,ref.quote,{offset:ref.offset}) + ")";
 }
 
 function renderParagraph(paragraph, sources, prefix = "", illustrated) {
@@ -103,14 +103,14 @@ function decodedRefs(raw, sources, exam = false) {
   if (!Array.isArray(raw) || raw.length > 4) throw Error("每段最多引用四处已读资料。");
   return raw.map(ref => {
     const src = sources.get(ref.id);
-    const quote = src && Number.isInteger(ref.quote_index) && passages(src.text)[ref.quote_index];
-    if (!quote || (src.role === "past_exam") !== exam) throw Error("引用须选自已读且用途对应的资料片段。");
+    const excerpt = src && Number.isInteger(ref.quote_index) && passages(src.text,true)[ref.quote_index];
+    if (!excerpt || (src.role === "past_exam") !== exam) throw Error("引用须选自已读且用途对应的资料片段。");
     const emphasis = ref.teacher_emphasis === true;
-    if (emphasis && (src.kind !== "transcript" || !/(重点|关键|注意|务必|一定要|特别重要|强调|要掌握|记住)/u.test(quote))) {
+    if (emphasis && (src.kind !== "transcript" || !/(重点|关键|注意|务必|一定要|特别重要|强调|要掌握|记住)/u.test(excerpt.quote))) {
       throw Error("老师强调需要包含强调措辞的课堂原话。");
     }
-    return {source:src.id,quote,emphasis};
-  }).filter((ref,index,all) => all.findIndex(r => r.source === ref.source && r.quote === ref.quote) === index);
+    return {source:src.id,...excerpt,emphasis};
+  }).filter((ref,index,all) => all.findIndex(r => r.source === ref.source && r.offset === ref.offset) === index);
 }
 
 function referencedSections(raw, sources) {
