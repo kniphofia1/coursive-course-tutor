@@ -47,7 +47,7 @@ export function renderLesson(s) {
     if (row.paragraphs) {
       const illustrated = new Set();
       return [heading, ...row.paragraphs.map(p => renderParagraph(p, s.sources, "", illustrated)),
-        renderParagraph(row.workedExample, s.sources, row.workedExample.refs.length ? "**材料中的例子**　" : "**补充例子**　"),
+        row.workedExample && renderParagraph(row.workedExample, s.sources, row.workedExample.refs.length ? "**材料中的例子**　" : "**补充例子**　"),
         "**自测**　" + row.question,
         row.examRefs.length ? "**练习参考**　" + row.examRefs.map(r => citation(r,s.sources)).join(" · ") : "",
       ].filter(Boolean).join("\n\n");
@@ -189,10 +189,20 @@ async function gatherLesson(input, services) {
       }
       sections = referencedSections(draft,sources);
       if (services.supportedClaims) {
-        const claims = sections.flatMap(row=>[...row.paragraphs,row.workedExample].flatMap(p=>
-          p.refs.map(ref=>({statement:p.text,quote:ref.quote}))));
-        const supported = await services.supportedClaims(claims.map((v,i)=>({...v,i})));
-        if (new Set(supported).size!==claims.length) throw Error("引用未能支持对应段落，请删除无依据的归因或改用可核实的原句。");
+        const assessed=sections.flatMap(row=>[...row.paragraphs,row.workedExample].flatMap(p=>
+          p.refs.map(ref=>({p,ref}))));
+        const supported=await services.supportedClaims(assessed.map(({p,ref},i)=>({i,statement:p.text,quote:ref.quote})));
+        const accepted=new Set(supported.map(i=>assessed[i]?.ref));
+        const verified=p=>p.refs.length===0 || p.refs.every(ref=>accepted.has(ref));
+        sections=sections.flatMap(row=>{
+          const paragraphs=row.paragraphs.filter(verified);
+          const primary=paragraphs.flatMap(p=>p.refs)[0];
+          if (!primary) return [];
+          const workedExample=verified(row.workedExample)?row.workedExample:null;
+          return [{...row,paragraphs,workedExample,source:primary.source,quote:primary.quote,emphasis:primary.emphasis,
+            explanation:paragraphs.map(p=>p.text).join("\n\n"),example:workedExample?.text??""}];
+        });
+        if (!sections.length) throw Error("引用未能支持对应段落，请只归纳有直接原句支持的讲解。");
       }
       break;
     } catch (error) {
@@ -201,7 +211,7 @@ async function gatherLesson(input, services) {
     }
   }
   const used = new Set(sections.flatMap(row =>
-    [...row.paragraphs.flatMap(p=>p.refs),...row.workedExample.refs,...row.examRefs].map(r=>r.source)));
+    [...row.paragraphs.flatMap(p=>p.refs),...(row.workedExample?.refs??[]),...row.examRefs].map(r=>r.source)));
   return {sections,sources:[...sources.values()].filter(src=>used.has(src.id)),
     coverage:evidence.coverage() ? "资料范围 · "+evidence.coverage()+"。" : ""};
 }
