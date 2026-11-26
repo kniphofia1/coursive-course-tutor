@@ -1,6 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile, readFile } from "node:fs/promises";
+import { mkdtemp, mkdir, rm, writeFile, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import tutor from "../agent.mjs";
@@ -12,7 +12,9 @@ async function fixture(t) {
   const entries = [];
   let tools, hook;
   const ctx = { sessionManager: { getSessionId: () => "session1", getBranch: () => entries } };
-  const api = { storage: { dir: async () => dir }, daemon: { get: async path => {
+  const api = { workspace: async name => {
+    const path = join(dir, name); await mkdir(path, {recursive:true}); return path;
+  }, storage: { dir: async () => dir }, daemon: { get: async path => {
     if (path === "/api/courses/c/lectures") return { course: { id: "c" }, lectures: [{ id: "l", title: "同步" }] };
     if (path === "/api/lectures/l/transcript?from_ms=0&to_ms=90000") return [{start_ms: 8000, end_ms: 12000, text: "等待线程在唤醒后要重新检查条件。"}];
     if (path.includes("/transcript?")) return [];
@@ -30,7 +32,7 @@ async function fixture(t) {
   const call = async (name, args = {}) => JSON.parse((await tools[name].execute("call", args, undefined, undefined, ctx)).content[0].text);
   const act = async (name, args = {}) => call(name, { revision: (await call("status")).revision, ...args });
   const start = () => act("start", {course_id:"c", goal:"线程同步"});
-  return { call, act, say, load, start, ctx, dir, hook: () => hook({}, ctx) };
+  return { call, act, say, load, start, ctx, dir, api, hook: () => hook({}, ctx) };
 }
 const quiz = (source, question) => ({source, lesson:"唤醒的线程要竞争锁。", question,
   options:["重新检查", "直接执行"], answer_index:0, rationale:"重新获得锁时共享状态可能已变。"});
@@ -102,4 +104,73 @@ test("简答须由学生明确提交，模型评阅须引用真实答卷",async 
   await assert.rejects(f.act("review_written",{checks:[{met:true,quote:"用户没说",reason:"错引"}]}),/实际写下/);
   const done=await f.act("review_written",{checks:[{met:true,quote:"共享条件可能改变",reason:"指出状态可能变化。"}]});
   assert.equal(done.stage,"transfer"); assert.equal(done.last.assessment,"模型按判据评阅");
+});
+
+test("同课新对话自动续学；新课只读全局背景；旁问与恢复摘要不泄题",async t=>{
+  const f=await fixture(t);
+  f.api.currentCourseId="c";
+  await f.start();
+  const e=await f.act("read_material",{lecture_id:"l"});
+  await f.act("plan",{units:[{title:"锁",source:e.id}]});
+  await f.act("teach",quiz(e.id,"尚未作答的题干"));
+  f.ctx.sessionManager.getSessionId=()=>"other-thread";
+  f.load();
+  const prompt=(await f.hook()).systemPrompt;
+  assert.match(prompt,/线程同步/);
+  assert.doesNotMatch(prompt,/尚未作答的题干|重新检查|重新获得锁/);
+  assert.equal((await f.call("status")).stage,"await_answer");
+  f.say("解释一次");
+  await assert.rejects(f.act("answer"),/还未计分/);
+  f.say("B");
+  assert.equal((await f.act("answer")).stage,"repair");
+  f.api.currentCourseId="unrelated";
+  assert.equal((await f.call("status")).stage,"new");
+  assert.equal(await f.hook(),undefined);
+  await assert.rejects(f.call("status",{course_id:"c"}),/当前对话/);
+});
+
+test("旧会话原样保留，迁入同课后重启可读，重复读取不会重复出题",async t=>{
+  const f=await fixture(t);
+  f.api.currentCourseId="c";
+  const legacy={schema:1,revision:9,course:"c",goal:"旧的复习",lectures:[],sources:{},units:[],index:0,attempts:[],stage:"prepare",paused:false};
+  const path=join(f.dir,"lesson-"+digest("session1")+".json");
+  await writeFile(path,JSON.stringify(legacy));
+  f.ctx.sessionManager.getSessionId=()=>"new-device-session";
+  assert.equal((await f.call("status")).revision,9);
+  assert.equal((await f.call("status")).goal,"旧的复习");
+  assert.equal((await f.call("status")).history.length,1);
+  assert.deepEqual(JSON.parse(await readFile(path,"utf8")),legacy);
+});
+
+test("写入的是当前课程摘要；写摘要失败时，已计分作答仍能恢复",async t=>{
+  const f=await fixture(t), reports=[];
+  f.api.currentCourseId="c";
+  f.api.reportCourseProgress=(id,name,brief)=>reports.push({id,brief});
+  await f.start();
+  const e=await f.act("read_material",{lecture_id:"l"});
+  await f.act("plan",{units:[{title:"信号量",source:e.id}]});
+  await f.act("teach",quiz(e.id,"测试题干"));
+  f.say("B"); await f.act("answer");
+  const row=reports.at(-1);
+  assert.equal(row.id,"c");
+  assert.equal(row.brief.last.outcome,"最近答错，待复测");
+  assert.doesNotMatch(JSON.stringify(row),/测试题干|重新获得锁/);
+  f.api.reportCourseProgress=()=>{throw new Error("磁盘满");};
+  f.say("暂停"); const result=await f.act("control",{action:"pause"});
+  assert.match(result.memoryWarning,/磁盘满/);
+  assert.equal((await f.call("status")).paused,true);
+});
+
+test("离线分支可分别恢复；未选择时禁止改写",async t=>{
+  const {readJournal,record,restore}=await import("../course-memory.mjs");
+  const f=await fixture(t); f.api.currentCourseId="c"; await f.start();
+  const dir=await f.api.workspace("course-"+digest("c").slice(0,48));
+  const {events,heads:[base]}=await readJournal(dir), old=restore(events,base);
+  const left=await record(dir,base,old,{...old,revision:2,goal:"分支甲"});
+  const right=await record(dir,base,old,{...old,revision:2,goal:"分支乙"});
+  assert.equal((await f.call("status")).stage,"choose_plan");
+  await assert.rejects(f.call("control",{action:"pause",revision:2}),/多份进度/);
+  assert.equal((await f.call("status",{checkpoint:left})).goal,"分支甲");
+  assert.equal((await f.call("status")).goal,"分支甲");
+  assert.equal((await f.call("status",{checkpoint:right})).goal,"分支乙");
 });

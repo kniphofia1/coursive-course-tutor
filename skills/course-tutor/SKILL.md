@@ -3,7 +3,7 @@ name: course-tutor
 description: 根据本地课程材料安排复习、分单元讲解、等待学生作答与做迁移复测。
 ---
 
-学生要求带练时，先用 status 查这段对话。每次写操作使用工具最近返回的 revision。找不到课程 ID 时通过当前页面或 list_courses 确认；省略考试日期也可以开始。只在缺少目标时问一个短问题。
+学生要求带练时，先用 status 查当前课程。普通对话先传已确认的 course_id。已有未结束计划就继续，已结束的历史可参考。若返回 choose_plan，列出各计划目标和进度，请学生选一条，再用 status(checkpoint) 绑定。不得替学生处理冲突。遇到 memoryWarning 说明摘要写入失败，保留已完成的作答。每次写操作使用工具最近返回的 revision。找不到课程 ID 时通过当前页面或 list_courses 确认；省略考试日期也可以开始。只在缺少目标时问一个短问题。
 
 用 start 返回的节次选资料。课件可先用内置 search_courseware 或 list_courseware 找到文件，再用 read_material 读正文；字幕用 position 指定秒数。根据学生所说的主题、时间和基础，读取有代表性的材料后用 plan 安排单元。不要把单段摘录宣称为全课考纲。引用工具给出的 coursive:// 链接。在资料不足时换入口或请学生导入原件。
 

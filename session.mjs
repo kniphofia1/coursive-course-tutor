@@ -1,9 +1,10 @@
-import { createHash, randomUUID } from "node:crypto";
-import { readFile, rename, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
+import { readdir } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { brief, digest, exclusive, jsonFile, lineage, readJournal, record, restore, writeJson } from "./course-memory.mjs";
 
-const locks = new Map();
-export const digest = (s) => createHash("sha256").update(s).digest("hex");
+export { digest };
+const checkedLegacy = new Set();
 
 export function string(value, title, max = 400) {
   if (typeof value !== "string" || !value.trim() || value.trim().length > max)
@@ -24,34 +25,86 @@ export function turn(ctx) {
   return { session, id: message.id, body: body.replace(/^<context>[\s\S]*?<\/context>\s*/, "").trim() };
 }
 
-export async function withSession(api, session, signal, run) {
-  // Host denies storage.dir() in background tasks. One file per conversation,
-  // atomic replacement and a shared lock across Pi factories in this process.
-  const file = join(await api.storage.dir(), `lesson-${digest(session)}.json`);
-  const previous = locks.get(file) ?? Promise.resolve();
-  const job = previous.catch(() => {}).then(async () => {
-    signal?.throwIfAborted();
-    let state;
-    try { state = JSON.parse(await readFile(file, "utf8")); }
-    catch (err) { if (err.code !== "ENOENT") throw new Error("伴学记录无法读取，已保留原文件。"); }
-    if (state && (state.schema !== 1 || !Number.isInteger(state.revision) || !Array.isArray(state.attempts)))
-      throw new Error("伴学记录格式不受支持，请保留原文件。");
-    const { save, result } = await run(state);
-    if (save) {
+export async function withSession(api, session, signal, run, options = {}) {
+  const privateDir = await api.storage.dir();
+  const key = digest(session);
+  const bindingFile = join(privateDir, "binding-" + key + ".json");
+  return exclusive(bindingFile, async () => {
+    const binding = await jsonFile(bindingFile);
+    const legacy = await jsonFile(join(privateDir, "lesson-" + key + ".json"));
+    if (legacy && (legacy.schema !== 1 || !Number.isInteger(legacy.revision) || !Array.isArray(legacy.attempts)))
+      throw new Error("伴学记录格式不受支持，已保留原文件。");
+    const course = api.currentCourseId ?? options.course ?? binding?.course ?? legacy?.course;
+    if (options.course && options.course !== course) throw new Error("请选择当前对话对应的课程。");
+    if (!course) return (await run(null, [])).result;
+    string(course, "课程 ID", 128);
+    const dir = await api.workspace("course-" + digest(course).slice(0, 48));
+    return exclusive(dir, async () => {
       signal?.throwIfAborted();
-      save.revision = (state?.revision ?? 0) + 1;
-      const tmp = file + "." + randomUUID();
-      try {
-        await writeFile(tmp, JSON.stringify(save), { mode: 0o600, flag: "wx" });
+      const journal = await readJournal(dir);
+      const roots = new Set([...journal.events.values()].filter(e => !e.parent).map(e => e.fields.planId));
+      const candidates = new Map();
+      if (!checkedLegacy.has(dir)) {
+        for (const name of await readdir(privateDir)) {
+          const match = /^lesson-([a-f0-9]{64})\.json$/.exec(name);
+          if (!match || roots.has(match[1])) continue;
+          // A damaged legacy file remains available to its original session for diagnosis.
+          let old;
+          try { old = await jsonFile(join(privateDir, name)); } catch { continue; }
+          if (old?.course === course && old.schema === 1 && Number.isInteger(old.revision) && Array.isArray(old.attempts))
+            candidates.set(match[1], old);
+        }
+      }
+      if (legacy?.course === course && !roots.has(key)) candidates.set(key, legacy);
+      for (const [planId, old] of candidates) {
+        const lectures = old.lectures.map(({id, title}) => ({id, title}));
+        await record(dir, null, null, { ...old, planId, lectures });
+      }
+      if (candidates.size) Object.assign(journal, await readJournal(dir));
+      checkedLegacy.add(dir);
+      const plans = journal.heads.map(head => ({ head, state: restore(journal.events, head) }))
+        .filter(p => !p.state.sections || !p.state.noteId)
+        .sort((a,b) => (a.state.updatedAt ?? 0) - (b.state.updatedAt ?? 0));
+      if (plans.some(p => p.state.course !== course)) throw new Error("课程记录与当前课程不匹配。");
+      const history = plans.map(p => ({ checkpoint: p.head, ...brief(p.state) }));
+      let choices = plans;
+      if (options.checkpoint) {
+        choices = plans.filter(p => p.head === options.checkpoint);
+        if (!choices.length) throw new Error("该进度已更新，请重新查看课程进度。");
+      } else {
+        const previous = binding?.course === course && binding.head;
+        const own = previous ? plans.filter(p => lineage(journal.events, p.head).includes(previous))
+          : plans.filter(p => p.state.planId === key);
+        const active = plans.filter(p => p.state.stage !== "finished");
+        choices = own.length ? own : active;
+      }
+      if (choices.length > 1) {
+        if (!options.readOnly) throw new Error("课程有多份进度，请先用 status 选择 checkpoint。");
+        return { stage: "choose_plan", revision: 0, course, history };
+      }
+      const chosen = choices[0];
+      const before = chosen?.state;
+      const { save, result } = await run(before ? structuredClone(before) : null, history);
+      let head = chosen?.head;
+      if (save) {
         signal?.throwIfAborted();
-        await rename(tmp, file);
-      } finally { await rm(tmp, { force: true }); }
-    }
-    return result ?? summary(save ?? state);
+        if (save.course !== course) throw new Error("不能将学习记录写入另一门课。");
+        const newPlan = !before || (options.start && before.stage === "finished");
+        save.planId = newPlan ? (before || history.length ? randomUUID() : key) : before.planId;
+        save.updatedAt = Date.now();
+        save.revision = (newPlan ? 0 : before.revision) + 1;
+        head = await record(dir, newPlan ? null : head, newPlan ? null : before, save);
+      }
+      if (head && (save || options.checkpoint || options.bind) && (binding?.head !== head || binding.course !== course))
+        await writeJson(bindingFile, { course, head });
+      const response = result ?? summary(save ?? before);
+      if (save && api.reportCourseProgress) {
+        try { await api.reportCourseProgress(course, save.courseTitle, brief(save)); }
+        catch (error) { return { ...response, memoryWarning: "进度已保存，课程记忆摘要未更新：" + error.message }; }
+      }
+      return response;
+    });
   });
-  locks.set(file, job);
-  try { return await job; }
-  finally { if (locks.get(file) === job) locks.delete(file); }
 }
 
 export function summary(s) {
