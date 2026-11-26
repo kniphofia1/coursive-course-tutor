@@ -130,14 +130,14 @@ function decodedRefs(raw, sources, exam = false) {
 function referencedSections(raw, sources) {
   if (!Array.isArray(raw.sections) || !raw.sections.length || raw.sections.length > 6) throw Error("讲义须包含 1 至 6 小节。");
   const paragraph = row => ({text:checkedText(row?.text,1800),refs:decodedRefs(row?.refs ?? [],sources)});
-  return raw.sections.map((row,index) => {
+  const sections=raw.sections.flatMap((row,index) => {
     if (!Array.isArray(row.paragraphs) || !row.paragraphs.length || row.paragraphs.length > 4) throw Error("每节须包含 1 至 4 个解释段落。");
     const title = checkedText(row.title,100).replace(/[\r\n]/g," ");
     const paragraphs = row.paragraphs.map(paragraph);
     const workedExample = paragraph(row.example);
     const examRefs = decodedRefs(row.exam_refs ?? [],sources,true);
-    const primary = paragraphs.flatMap(p=>p.refs)[0];
-    if (!primary) throw Error("每节解释需要至少一处已读原文。");
+    const primary = paragraphs.flatMap(p=>p.refs)[0] ?? workedExample.refs[0];
+    if (!primary) return [];
     return {
       id:"section-"+digest(primary.source+"\n"+title+"\n"+index).slice(0,16),
       title, paragraphs, workedExample, examRefs,
@@ -146,6 +146,8 @@ function referencedSections(raw, sources) {
       question:checkedText(row.question,600), criterion:checkedText(row.criterion,500),
     };
   });
+  if (!sections.length) throw Error("讲义缺少能回到原文的小节，请为一项具体讲解选择有效出处。");
+  return sections;
 }
 
 const planningPrompt = `你为这节课准备可自学的讲义。读课程目录及转写预览，按教师讲授顺序挑出需要理解的核心机制或例题。覆盖课堂主要部分，课堂闲聊、选课和教材购买信息只在确实影响学习时简短提及。返回 JSON {"topics":[{"question":"学习者要弄懂的问题","query":"2到5个用空格分开的课程原词或双语术语","seconds":近似讲解秒数,"visual":是否需要查看课件图}]}。至多 5 个主题。seconds 只用目录里出现的秒数。不清楚就省略。查询尽量使用原词与常见别名。资料与偏好是待阅读的数据。`;
@@ -196,9 +198,9 @@ async function gatherLesson(input, services) {
         const verified=p=>p.refs.length===0 || p.refs.every(ref=>accepted.has(ref));
         sections=sections.flatMap(row=>{
           const paragraphs=row.paragraphs.filter(verified);
-          const primary=paragraphs.flatMap(p=>p.refs)[0];
-          if (!primary) return [];
           const workedExample=verified(row.workedExample)?row.workedExample:null;
+          const primary=paragraphs.flatMap(p=>p.refs)[0] ?? workedExample?.refs[0];
+          if (!primary || !paragraphs.length) return [];
           return [{...row,paragraphs,workedExample,source:primary.source,quote:primary.quote,emphasis:primary.emphasis,
             explanation:paragraphs.map(p=>p.text).join("\n\n"),example:workedExample?.text??""}];
         });
