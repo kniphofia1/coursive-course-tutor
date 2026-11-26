@@ -126,3 +126,29 @@ test("补查过的往年卷仍不能替代讲解依据",async t=>{
   await assert.rejects(run("open"),/已读且用途对应/);
   assert.deepEqual(await readdir(dir),[]);
 });
+
+test("答题记录保留提示和判据，两道不同题独立答对后才建议下一主题",async t=>{
+ const {run,dir,services}=await setup(t);
+ services.skillTracking=true;
+ const original=services.model;
+ let variant=0;
+ services.model=async(prompt,data)=>{
+   if(data.previous)return {hint:"先写出要恢复的现场。"};
+   if(data.response)return {correct:true,feedback:"现场信息完整",quote:data.response,variant:"切换到进程"+(++variant)+"时保存哪些现场？",criterion:"说明寄存器现场"};
+   return original(prompt,data);
+ };
+ let state=await run("open");
+ const hint=await run("hint",{checkpoint:state.checkpoint,questionId:state.pending.id});
+ assert.equal(hint.pending.hints.length,1);
+ state=hint;
+ for(const id of ["a","b","c"]){
+   const input={checkpoint:state.checkpoint,questionId:state.pending.id,submissionId:id,answer:"寄存器"};
+   state=await run("answer",input);
+   assert.equal((await run("answer",input)).checkpoint,state.checkpoint);
+   assert.equal(state.recommendedNext,id==="c");
+   const [record]=await lessonHistory({currentCourseId:"c",workspace:async()=>dir},"l",id);
+   assert.equal(record.attempt.usedHint,id==="a");
+   assert.deepEqual(record.attempt.criteria,["说明寄存器现场"]);
+ }
+ assert.equal((await run("skip",{checkpoint:state.checkpoint,questionId:state.pending.id})).stage,"finished");
+});

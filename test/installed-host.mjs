@@ -85,7 +85,8 @@ try {
     runtime:{completeSimple:async(_model,{messages})=>{
       generations++;
       const input = JSON.parse(messages[0].content);
-      const draft = input.material ? {sections:[{
+      const draft = input.sources ? {refs:[{id:input.sources[0].id,quote:"条件变量用于等待共享条件。"}]} :
+        input.quotes || input.claims ? {supported:[0]} : input.material ? {sections:[{
         title:"条件变量",paragraphs:[{text:"等待共享条件。",refs:[{id:input.material[0].id,quote_index:0}]}],
         example:{text:"等待队列出现元素。",refs:[]},question:"唤醒后检查什么？",criterion:"共享条件",
       }]} : {topics:[{query:"条件变量"}]};
@@ -95,8 +96,9 @@ try {
   const deps = {plugins:host,call:lessonApi,pipeline,memory};
   const handout = await runLessonStudy(deps,"l",{action:"open"});
   assert.match(handout.note.body,/coursive:\/\/lecture\/l\?t=42/);
+  const afterFirst=generations;
   assert.equal((await runLessonStudy(deps,"l",{action:"open"})).pending.id,handout.pending.id);
-  assert.equal(generations,2);
+  assert.equal(generations,afterFirst);
   conv.course_id = "other";
   assert.equal((await call("status")).history.length,0);
   console.log("PASS: packaged plugin, installed Coursive host, Pi session, composer action, source read, turn guard, restart, transfer.");
